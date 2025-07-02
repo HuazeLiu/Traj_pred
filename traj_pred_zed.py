@@ -2,24 +2,33 @@ import os, sys, math, cv2, numpy as np, pyzed.sl as sl
 from tqdm import tqdm
 import supervision as sv
 from inference.models import YOLOWorld
+import csv
+from scipy.optimize import minimize
+
+def objective_function(params, t, y):
+    a, b, c = params
+    y_fit = a * t**2 + b * t + c
+    error = np.sum((y - y_fit)**2)
+    return error
 
 YOLO_MODEL_ID   = "yolo_world/l"
-YOLO_CLASSES    = ['tennis ball']
+YOLO_CLASSES    = ['bottle']
 SAVE_MP4        = True
-OUT_MP4_NAME    = "ball_traj_live.mp4"
+OUT_MP4_NAME    = "bottle_traj_live.mp4"
+OUT_CSV_NAME    = 'bottle_traj_.csv'
 
-MIN_FIT_POINTS  = 5 # start fitting after this many 3D points
-FIT_WINDOW      = 5   # equally-spaced samples used for polyfit
-PRED_HORIZON    = 15 # frames to predict
-CONF_THRES      = 0.003 # Yolo confidence score
-DT              = 1/60   # 60 Hz capture
+MIN_FIT_POINTS  = 5       # start fitting after this many 3-D points
+FIT_WINDOW      = 4     # equally-spaced samples used for polyfit
+PRED_HORIZON    = 15      
+CONF_THRES      = 0.003   # Yolo confidence score
+DT              = 1/30 # 30 Hz 
 
 
 yolo = YOLOWorld(model_id="yolo_world/l")
 yolo.set_classes(YOLO_CLASSES)
 zed = sl.Camera()
-init = sl.InitParameters(camera_resolution = sl.RESOLUTION.HD720,
-                         camera_fps        = 60,
+init = sl.InitParameters(camera_resolution = sl.RESOLUTION.HD1080,
+                         camera_fps        = 30,
                          depth_mode        = sl.DEPTH_MODE.ULTRA,
                          coordinate_units  = sl.UNIT.METER)
 if zed.open(init) != sl.ERROR_CODE.SUCCESS:
@@ -27,12 +36,11 @@ if zed.open(init) != sl.ERROR_CODE.SUCCESS:
 
 runtime  = sl.RuntimeParameters()
 left_img = sl.Mat()
-pc_mat   = sl.Mat()  # XYZRGBA point cloud
+pc_mat   = sl.Mat()
 
 h, w = zed.get_camera_information().camera_configuration.resolution.height, \
        zed.get_camera_information().camera_configuration.resolution.width
 
-# video writer
 writer = None
 if SAVE_MP4:
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -40,9 +48,11 @@ if SAVE_MP4:
 
 
 xs, ys, zs, ts = [], [], [], []
-frame_idx      = 0
+frame_idx       = 0
 print("Press  q  in the display window to quit.")
 
+gt = []
+pred = []
 while True:
     if zed.grab(runtime) != sl.ERROR_CODE.SUCCESS:
         continue
@@ -58,23 +68,21 @@ while True:
     if result.predictions:
         best = max(result.predictions, key=lambda p: p.confidence)
         
-        #Draw the current detection
-        x, y, w, h = int(best.x), int(best.y), int(best.width), int(best.height)
-        xmin, ymin = x - w // 2, y - h // 2
-        xmax, ymax = x + w // 2, y + h // 2
+        x, y, w_box, h_box = int(best.x), int(best.y), int(best.width), int(best.height)
+        xmin, ymin = x - w_box // 2, y - h_box // 2
+        xmax, ymax = x + w_box // 2, y + h_box // 2
         cv2.rectangle(imgL, (xmin, ymin), (xmax, ymax), (0, 0, 255), 2)
         cv2.putText(imgL, best.class_name, (xmin, ymin - 10), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
         cv2.circle(imgL, (x, y), 8, (0, 255, 0), cv2.FILLED)
 
-        #Get 3D point and add it to history
         err, xyz_rgba = pc_mat.get_value(x, y)
         X, Y, Z, _ = xyz_rgba
         if np.isfinite(X):
             xs.append(X); ys.append(Y); zs.append(Z); ts.append(frame_idx)
+        gt.append((X, Y, Z)) 
 
-
-    if xs: # Only draw if we have points
+    if xs:
         x_draw, y_draw, z_draw = xs[-25:], ys[-25:], zs[-25:]
         for Xp, Yp, Zp in zip(x_draw, y_draw, z_draw):
             if not np.isfinite(Xp) or Zp <= 0: continue
@@ -82,7 +90,6 @@ while True:
             v_tr = int(fy * Yp / Zp + cy)
             cv2.circle(imgL, (u_tr, v_tr), 3, (0, 255, 0), cv2.FILLED)
 
-    # Fit the model and draw the predicted future trajectory
     if len(xs) >= MIN_FIT_POINTS:
         t_newest, x_newest, y_newest, z_newest = ts[-10:], xs[-10:], ys[-10:], zs[-10:]
         
@@ -94,20 +101,49 @@ while True:
         ys_s = np.array(y_newest)[idx_sample]
         zs_s = np.array(z_newest)[idx_sample]
 
-        Bx, Cx = np.polyfit(t_s, xs_s, 1)      # Linear fit for horizontal axis
-        Ay, By, Cy = np.polyfit(t_s, ys_s, 2)  # Quadratic fit for vertical axis
-        Bz, Cz = np.polyfit(t_s, zs_s, 1)      # Linear fit for depth axis
+
+        initial_guess = np.polyfit(t_s, ys_s, 2)
+        y_bounds = [(0, np.inf), (-np.inf, np.inf), (-np.inf, np.inf)]
+        
+        result = minimize(
+            objective_function,
+            x0=initial_guess,
+            args=(t_s, ys_s),
+            bounds=y_bounds
+        )
+        Ay, By, Cy = result.x
+        # linear
+        Bx, Cx = np.polyfit(t_s, xs_s, 1)
+        Bz, Cz = np.polyfit(t_s, zs_s, 1)
         
         future_t = np.arange(frame_idx + 1, frame_idx + 1 + PRED_HORIZON)
         pred_x = Bx * future_t + Cx
         pred_y = Ay * future_t**2 + By * future_t + Cy
         pred_z = Bz * future_t + Cz
 
+        pred.append(list(zip(pred_x, pred_y, pred_z)))
+
         for Xp, Yp, Zp in zip(pred_x, pred_y, pred_z):
             if not np.isfinite(Zp) or Zp <= 0: continue
             u_p = int(fx * Xp / Zp + cx)
             v_p = int(fy * Yp / Zp + cy)
             cv2.circle(imgL, (u_p, v_p), 5, (255, 0, 255), cv2.FILLED)
+            
+        curve_t = np.arange(t_s[0], frame_idx + PRED_HORIZON)
+        curve_x = Bx * curve_t + Cx
+        curve_y = Ay * curve_t**2 + By * curve_t + Cy
+        curve_z = Bz * curve_t + Cz
+        
+        prev_point_2d = None
+        for Xp, Yp, Zp in zip(curve_x, curve_y, curve_z):
+            if not np.isfinite(Zp) or Zp <= 0: continue
+            u_p = int(fx * Xp / Zp + cx)
+            v_p = int(fy * Yp / Zp + cy)
+            curr_point_2d = (u_p, v_p)
+            
+            if prev_point_2d is not None:
+                cv2.line(imgL, prev_point_2d, curr_point_2d, (0, 255, 255), 2)
+            prev_point_2d = curr_point_2d
 
     cv2.imshow("trajectory", imgL)
     if writer: writer.write(imgL)
@@ -115,7 +151,21 @@ while True:
         break
     frame_idx += 1
 
+with open(OUT_CSV_NAME, mode='w', newline='') as file:
+    csv_writer = csv.writer(file)
+    csv_writer.writerow(['Frame', 'Type', 'X', 'Y', 'Z'])
 
+    for f, (x, y, z) in enumerate(zip(xs, ys, zs)):
+        if np.isfinite(x) and np.isfinite(y) and np.isfinite(z):
+            csv_writer.writerow([ts[f], 'gt', x, y, z])
+
+    for f, triplets in enumerate(pred):
+        for (x, y, z) in triplets:
+            if np.isfinite(x) and np.isfinite(y) and np.isfinite(z):
+                pred_frame = ts[-1] + f + 1
+                csv_writer.writerow([pred_frame, 'pred', x, y, z])
+
+print("Trajectory saved to", OUT_CSV_NAME)
 zed.close()
 if writer: writer.release()
 cv2.destroyAllWindows()
