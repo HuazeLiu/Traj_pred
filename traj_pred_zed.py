@@ -8,10 +8,10 @@ YOLO_CLASSES    = ['tennis ball']
 SAVE_MP4        = True
 OUT_MP4_NAME    = "ball_traj_live.mp4"
 
-MIN_FIT_POINTS  = 5      # start fitting after this many 3-D points
-FIT_WINDOW      = 5     # equally-spaced samples used for polyfit
-PRED_HORIZON    = 15      # frames to extrapolate
-CONF_THRES      = 0.003   # Yolo confidence score
+MIN_FIT_POINTS  = 5 # start fitting after this many 3D points
+FIT_WINDOW      = 5   # equally-spaced samples used for polyfit
+PRED_HORIZON    = 15 # frames to predict
+CONF_THRES      = 0.003 # Yolo confidence score
 DT              = 1/60   # 60 Hz capture
 
 
@@ -94,7 +94,6 @@ while True:
         ys_s = np.array(y_newest)[idx_sample]
         zs_s = np.array(z_newest)[idx_sample]
 
-        # Fit with the correct physics model
         Bx, Cx = np.polyfit(t_s, xs_s, 1)      # Linear fit for horizontal axis
         Ay, By, Cy = np.polyfit(t_s, ys_s, 2)  # Quadratic fit for vertical axis
         Bz, Cz = np.polyfit(t_s, zs_s, 1)      # Linear fit for depth axis

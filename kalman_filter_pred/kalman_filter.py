@@ -1,28 +1,9 @@
-"""kalman_filter.py
-Complete pipeline utilities:
-1. `StereoCalib` -- holds intrinsics/baseline parsed from the calib_stereo.txt
-2. `triangulate()` -- stereo triangulation for one pair of pixel centres.
-3. `KalmanFilterCV` -- 3D constant-velocity KF (unchanged core maths).
-4. Example `track_sequence()` - given left/right image lists and YOLO detections (centre pixels), 
-                                outputs filtered 3D trajectory & predictions.
-
-Assumptions
-------------
-* ZED HD720 @ 60 FPS ⇒  `dt=1/60`.
-* YOLO detector supplies a dict per frame:  `{"u": u_px, "v": v_px}` for **both eyes**.
-* Calibration file is exactly as you posted.
-
-You can plug this module into your main loop or adapt the `if __name__ == "__main__"` demo.
-"""
 from __future__ import annotations
 import cv2
 import numpy as np
 from dataclasses import dataclass
 from typing import List, Optional, Dict
 
-# --------------------------- #
-#  Stereo calibration holder  #
-# --------------------------- #
 @dataclass
 class StereoCalib:
     fx: float
@@ -31,17 +12,14 @@ class StereoCalib:
     cy: float
     width: int
     height: int
-    baseline: float  # metres
+    baseline: float
 
     @classmethod
     def from_txt(cls, path: str) -> "StereoCalib":
         with open(path) as f:
             lines = [l.strip() for l in f if l.strip()]
-        # the first line is: "Pinhole fx fy cx cy 0"
         _, fx, fy, cx, cy, _ = lines[0].split()
-        # line 2: width height  ("672 376")
         w, h = map(int, lines[1].split())
-        # line 3: baseline
         baseline = float(lines[-1])
         return cls(float(fx), float(fy), float(cx), float(cy), w, h, baseline)
 
@@ -55,60 +33,35 @@ class StereoCalib:
         P_R = np.hstack([K, K @ T])
         return P_L, P_R
 
-# ----------------------------------------------------------------------------- 
-# 3-D constant-acceleration KF with gravity                                   
-# State: [x, y, z, vx, vy, vz, ax, ay, az]ᵀ                                
-# ----------------------------------------------------------------------------- 
-
+                                 
+# State: [x, y, z, vx, vy, vz]                      
 class KalmanFilter:
     def __init__(self, dt=1 / 60, process_var=1e-2, meas_var=1e-3):
         self.dt = dt
-
-        # --------------------------
         # State transition matrix F
-        # --------------------------
         self.F = np.eye(6)
         self.F[0:3, 3:6] = np.eye(3) * dt  # position += velocity * dt
-
-        # --------------------------
         # Measurement matrix H
-        # --------------------------
         self.H = np.zeros((3, 6))
-        self.H[0:3, 0:3] = np.eye(3)  # we observe position only
-
-        # --------------------------
-        # Noise covariances
-        # --------------------------
-        self.Q = np.eye(6) * process_var   # process noise
-        self.R = np.eye(3) * meas_var      # measurement noise
-
-        # --------------------------
+        self.H[0:3, 0:3] = np.eye(3)
+        self.Q = np.eye(6) * process_var # process noise
+        self.R = np.eye(3) * meas_var # measurement noise
         # Internal state
-        # --------------------------
-        self.x = np.zeros((6, 1))          # state vector: [x, y, z, vx, vy, vz]
-        self.P = np.eye(6)                 # state covariance
-        self.I = np.eye(6)                 # identity for updates
+        self.x = np.zeros((6, 1))
+        self.P = np.eye(6) # state covariance
+        self.I = np.eye(6) # identity for updates
 
-    # -------------------------------------------------------------------------
-    # Initialize from 2 position measurements
-    # -------------------------------------------------------------------------
     def initialize(self, xyz0: np.ndarray, xyz1: np.ndarray):
         v0 = (xyz1 - xyz0) / self.dt
 
         self.x[0:3, 0] = xyz0
         self.x[3:6, 0] = v0
 
-    # -------------------------------------------------------------------------
-    # Predict one step forward
-    # -------------------------------------------------------------------------
     def predict(self):
         self.x = self.F @ self.x
         self.P = self.F @ self.P @ self.F.T + self.Q
         return self.x[0:3].ravel()
 
-    # -------------------------------------------------------------------------
-    # Correct with a position measurement
-    # -------------------------------------------------------------------------
     def update(self, z: np.ndarray):
         z = z.reshape(3, 1)
         y = z - self.H @ self.x
@@ -118,13 +71,6 @@ class KalmanFilter:
         self.x += K @ y
         self.P = (self.I - K @ self.H) @ self.P
         return self.x[0:3].ravel()
-
-
-
-
-# -----------------------------------------------------------------------------
-# 3. Stereo triangulation utility
-# -----------------------------------------------------------------------------
 
 def triangulate(ul, vl, ur, vr, calib: StereoCalib):
     P1, P2 = calib.proj_mats()
