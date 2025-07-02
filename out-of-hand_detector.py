@@ -71,15 +71,12 @@ while True:
         if cv2.waitKey(1) & 0xFF == ord('q'): break
         continue
 
-    # This check will only run if the object is still considered "in hand".
     if in_hand and prev_Y is not None:
         y_vel = (Y - prev_Y) / DT
-        # Once y_vel exceeds the threshold, in_hand becomes False permanently.
         if y_vel > Y_DROP_THRESH:
             in_hand = False
     prev_Y = Y
 
-    # Project for display
     u_proj = int(fx * X / Z + cx)
     v_proj = int(fy * Y / Z + cy)
     color = (0, 0, 255) if in_hand else (0, 255, 0)
@@ -88,7 +85,6 @@ while True:
     cv2.circle(imgL, (u_proj, v_proj), 8, color, cv2.FILLED)
     cv2.putText(imgL, label, (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
 
-    # Draw 2D bounding box (optional)
     box_w, box_h = int(best.width), int(best.height)
     xmin = int(best.x - box_w / 2)
     ymin = int(best.y - box_h / 2)
